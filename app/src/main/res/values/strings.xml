@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Safe Telegram</string>
+    <string name="accessibility_service_description">Memblokir Global Search Telegram (username publik, channel publik, grup publik, bot publik) sambil membiarkan chat, panggilan, dan pencarian di dalam chat tetap berjalan normal. Tidak mengubah data Telegram.</string>
+
+    <string name="status_title">Status Perlindungan</string>
+    <string name="status_active">Aktif — Global Search Telegram diblokir</string>
+    <string name="status_inactive">Belum aktif — izinkan Accessibility Service dulu</string>
+    <string name="btn_open_settings">Buka Pengaturan Accessibility</string>
+    <string name="explainer">Safe Telegram tidak mengubah APK atau database Telegram. Aplikasi ini hanya mengawasi tampilan layar Telegram lewat Accessibility Service, lalu menutup Global Search saat terdeteksi terbuka. Chat pribadi, grup, channel yang sudah diikuti, panggilan suara/video, voice note, kirim file, dan pencarian di dalam chat tetap berfungsi seperti biasa.</string>
+</resources>
