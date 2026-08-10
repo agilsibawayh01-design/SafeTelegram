@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Hardened configuration - every attribute here is deliberately minimal.
+  See README.md "Audit keamanan v2" section for the full rationale behind
+  each removed flag/event.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds"
     android:canRetrieveWindowContent="true"
-    android:notificationTimeout="50"
+    android:notificationTimeout="100"
     android:packageNames="org.telegram.messenger,org.telegram.messenger.web"
     android:description="@string/accessibility_service_description" />

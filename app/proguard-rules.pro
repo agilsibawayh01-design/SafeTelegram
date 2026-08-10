@@ -1,2 +1,3 @@
-# Keep accessibility service class name intact (referenced from XML/manifest)
--keep class com.safetelegram.guard.TelegramGuardService { *; }
+# Keep the accessibility service class intact (referenced by fully-qualified
+# name from AndroidManifest.xml / accessibility_service_config.xml).
+-keep class com.safetelegram.guard.service.TelegramGuardService { *; }

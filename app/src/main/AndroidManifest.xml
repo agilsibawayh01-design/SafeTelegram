@@ -1,8 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      No other permissions are requested. In particular:
+      - No RECEIVE_BOOT_COMPLETED: removed along with BootReceiver — the
+        system re-binds enabled accessibility services automatically after
+        boot, so this permission had zero function and only added to the
+        app's risk signature (BOOT_COMPLETED + AccessibilityService is a
+        well-known persistence pattern that security scanners flag).
+      - No FOREGROUND_SERVICE: this app has no foreground/background Service,
+        only an AccessibilityService (a different component type, bound by
+        the system itself — it does not need this permission).
+      - No INTERNET, no storage, no overlay permissions: this app makes no
+        network calls, stores no files, and draws no overlays.
+    -->
 
     <application
         android:allowBackup="false"
@@ -12,7 +23,7 @@
         android:supportsRtl="true">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".presentation.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -20,10 +31,16 @@
             </intent-filter>
         </activity>
 
-        <!-- Core component: the Accessibility Service that watches Telegram's
-             window/content changes and blocks Global Search. -->
+        <!--
+          android:exported="true" is required by the framework for
+          AccessibilityService (the system must be able to bind to it), and
+          is safe despite being exported: the BIND_ACCESSIBILITY_SERVICE
+          permission below is a signature|system-level permission that only
+          the OS itself holds, so no third-party app can bind to this
+          service directly.
+        -->
         <service
-            android:name=".TelegramGuardService"
+            android:name=".service.TelegramGuardService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
             android:label="@string/app_name">
@@ -34,18 +51,6 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
-
-        <!-- Not strictly required for AccessibilityService (the system re-binds
-             enabled accessibility services automatically after boot), but kept
-             so the app can show correct status on first boot / update. -->
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
 
     </application>
 
