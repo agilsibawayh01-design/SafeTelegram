@@ -1,0 +1,20 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+/app/build
+/app/release
+
+# Release signing material — NEVER commit these. In CI, the keystore is
+# decoded from a base64 GitHub Secret at build time (see .github/workflows/build.yml).
+*.jks
+*.keystore
+RELEASE_KEYSTORE_CREDENTIALS.txt
+
