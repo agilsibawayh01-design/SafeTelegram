@@ -1,173 +1,128 @@
-package com.safetelegram.guard
+package com.safetelegram.guard.service
 
 import android.accessibilityservice.AccessibilityService
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityNodeInfo
+import com.safetelegram.guard.domain.ArgoSearchDetector
+import com.safetelegram.guard.domain.ContentDescriptionSearchEntryPointDetector
+import com.safetelegram.guard.domain.GlobalSearchDetector
+import com.safetelegram.guard.domain.RateLimiter
+import com.safetelegram.guard.domain.SearchEntryPointDetector
+import com.safetelegram.guard.domain.SignatureArgoSearchDetector
+import com.safetelegram.guard.domain.TextSignatureGlobalSearchDetector
+import com.safetelegram.guard.infra.AccessibilityNodeInfoAdapter
 
-/**
- * Safe Telegram — TelegramGuardService
- *
- * Strategy
- * --------
- * Android's AccessibilityService API cannot literally "consume" a touch event
- * inside another app (it can only consume key events and its own gestures),
- * so we cannot physically prevent the tap on the Search icon from being
- * delivered to Telegram. Instead we use the approach every reputable
- * "distraction blocker" accessibility app uses:
- *
- *   1. Detect the moment Global Search opens (by scanning the visible node
- *      tree for signatures that only appear in that screen).
- *   2. Immediately call performGlobalAction(GLOBAL_ACTION_BACK) to bounce the
- *      user back to the chat list, before they can read/tap anything.
- *   3. Do this with no dialog, no toast, no sound (Silent Mode requirement).
- *
- * Because Telegram's internal resource-id names can change between app
- * versions/forks, detection is deliberately layered: we first try known
- * resource-id patterns, then fall back to text-based signatures (section
- * headers Telegram shows above global results). If Telegram changes its UI
- * and detection stops matching, update SEARCH_TRIGGER_IDS /
- * GLOBAL_RESULT_SIGNATURES below — no other code changes should be needed.
- */
 class TelegramGuardService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
-    private var lastBackAt = 0L
+
+    private val globalSearchDetector: GlobalSearchDetector = TextSignatureGlobalSearchDetector()
+    private val entryPointDetector: SearchEntryPointDetector = ContentDescriptionSearchEntryPointDetector()
+
+    private val treeWalkLimiter = RateLimiter(TREE_WALK_MIN_INTERVAL_MS) { SystemClock.elapsedRealtime() }
+    private val backActionLimiter = RateLimiter(BACK_ACTION_MIN_INTERVAL_MS) { SystemClock.elapsedRealtime() }
+
+    // Argo Search Auto-Exit — instance terpisah dari Global Search, sengaja
+    // tidak berbagi state supaya tidak ada risiko saling memengaruhi.
+    private val argoSearchDetector: ArgoSearchDetector = SignatureArgoSearchDetector()
+    private val argoTreeWalkLimiter = RateLimiter(ARGO_TREE_WALK_MIN_INTERVAL_MS) { SystemClock.elapsedRealtime() }
+    private val argoBackActionLimiter = RateLimiter(ARGO_BACK_ACTION_MIN_INTERVAL_MS) { SystemClock.elapsedRealtime() }
 
     companion object {
         private const val TAG = "SafeTelegramGuard"
 
-        val TELEGRAM_PACKAGES = setOf(
-            "org.telegram.messenger",
-            "org.telegram.messenger.web"
-        )
+        private const val TREE_WALK_MIN_INTERVAL_MS = 250L
 
-        // Resource-id fragments seen on the chat-list search bar / search
-        // fragment in stock Telegram for Android. Matched with "contains"
-        // since Telegram appends dynamic suffixes to some ids.
-        val SEARCH_ENTRY_ID_HINTS = listOf(
-            "search_edit_text",
-            "chats_search",
-            "action_bar_search"
-        )
+        private const val BACK_ACTION_MIN_INTERVAL_MS = 400L
 
-        // Section headers Telegram shows ONLY when results include public
-        // (global) entities — i.e. the thing we must block. Local search
-        // inside a single chat never shows these headers.
-        val GLOBAL_RESULT_SIGNATURES = listOf(
-            "global search",
-            "pencarian global",
-            "public channel",
-            "channel publik",
-            "global"
-        )
+        private const val POST_CLICK_CHECK_DELAY_MS = 180L
 
-        // Debounce so we don't spam GLOBAL_ACTION_BACK if several
-        // accessibility events fire for the same UI change.
-        const val BACK_DEBOUNCE_MS = 400L
-
-        // Small delay before re-checking after a raw click on the search
-        // icon, to give Telegram's fragment transaction time to render.
-        const val POST_CLICK_CHECK_DELAY_MS = 180L
+        // Argo Search: cooldown lebih longgar dari Global Search karena
+        // layar tujuan setelah back (daftar chat) bisa saja masih
+        // menampilkan baris "Argo Search" sesaat.
+        private const val ARGO_TREE_WALK_MIN_INTERVAL_MS = 800L
+        private const val ARGO_BACK_ACTION_MIN_INTERVAL_MS = 800L
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        Log.i(TAG, "Safe Telegram guard connected")
+        Log.i(TAG, "Safe Telegram guard connected (Telegram-scoped, no cross-app monitoring)")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        val pkg = event.packageName?.toString() ?: return
-        if (pkg !in TELEGRAM_PACKAGES) return
-
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED -> handlePossibleSearchTap(event)
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_FOCUSED -> checkForGlobalSearchNow()
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> checkForGlobalSearchNow(force = true)
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                if (eventLooksRelevant(event)) checkForGlobalSearchNow(force = false)
+            }
+        }
+
+        // --- TAMBAHAN: Argo Search Auto-Exit ---
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            checkForArgoSearchNow()
         }
     }
 
-    /**
-     * When the user taps the search icon/field on the chat-list screen, react
-     * fast: schedule a check shortly after, once Telegram has rendered the
-     * search fragment. Tapping search WHILE INSIDE a chat is left alone —
-     * that's FR-06/07/08 (in-chat search must keep working) — we only react
-     * when the tap looks like it targets the top-level search entry point.
-     */
+    private fun eventLooksRelevant(event: AccessibilityEvent): Boolean {
+        val combined = buildString {
+            event.text?.forEach { append(it).append(' ') }
+            event.contentDescription?.let { append(it) }
+        }.lowercase()
+        return combined.contains("search") || combined.contains("cari") || combined.contains("global")
+    }
+
     private fun handlePossibleSearchTap(event: AccessibilityEvent) {
         val source = event.source ?: return
-        val looksLikeSearchEntry = isSearchEntryPoint(source)
-        source.recycle()
+        val adapter = AccessibilityNodeInfoAdapter(source)
+        val looksLikeSearchEntry = entryPointDetector.isSearchEntryPoint(adapter)
+        adapter.recycle()
         if (!looksLikeSearchEntry) return
 
-        handler.postDelayed({ checkForGlobalSearchNow() }, POST_CLICK_CHECK_DELAY_MS)
+        handler.postDelayed({ checkForGlobalSearchNow(force = true) }, POST_CLICK_CHECK_DELAY_MS)
     }
 
-    private fun isSearchEntryPoint(node: AccessibilityNodeInfo): Boolean {
-        val resId = node.viewIdResourceName?.lowercase().orEmpty()
-        val desc = node.contentDescription?.toString()?.lowercase().orEmpty()
-        if (SEARCH_ENTRY_ID_HINTS.any { resId.contains(it) }) return true
-        if (desc == "search" || desc.contains("cari")) return true
-        return false
-    }
+    private fun checkForGlobalSearchNow(force: Boolean) {
+        if (!force && !treeWalkLimiter.tryAcquire()) return
 
-    /**
-     * Walk the currently visible Telegram window and, if it looks like
-     * Global Search results are showing, bounce back to the chat list.
-     * Silent: no toast, no vibration, no dialog (per Silent Mode / FR-10).
-     */
-    private fun checkForGlobalSearchNow() {
         val root = rootInActiveWindow ?: return
+        val adapter = AccessibilityNodeInfoAdapter(root)
         try {
-            if (containsGlobalSearchSignature(root)) {
+            if (globalSearchDetector.isGlobalSearchVisible(adapter)) {
                 bounceBackSilently()
             }
         } finally {
-            root.recycle()
+            adapter.recycle()
         }
-    }
-
-    private fun containsGlobalSearchSignature(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
-        if (depth > 40) return false // safety guard against pathological trees
-
-        val text = node.text?.toString()?.lowercase()
-        val desc = node.contentDescription?.toString()?.lowercase()
-        val resId = node.viewIdResourceName?.lowercase()
-
-        if (text != null && GLOBAL_RESULT_SIGNATURES.any { text == it || text.startsWith(it) }) {
-            return true
-        }
-        if (desc != null && GLOBAL_RESULT_SIGNATURES.any { desc.contains(it) }) {
-            return true
-        }
-        if (resId != null && (resId.contains("global_search") || resId.contains("public_search"))) {
-            return true
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val found = try {
-                containsGlobalSearchSignature(child, depth + 1)
-            } finally {
-                child.recycle()
-            }
-            if (found) return true
-        }
-        return false
     }
 
     private fun bounceBackSilently() {
-        val now = System.currentTimeMillis()
-        if (now - lastBackAt < BACK_DEBOUNCE_MS) return
-        lastBackAt = now
+        if (!backActionLimiter.tryAcquire()) return
         performGlobalAction(GLOBAL_ACTION_BACK)
-        // Second back shortly after in case Telegram needs two pops
-        // (e.g. keyboard dismiss + fragment pop) to fully clear the
-        // search fragment. Still silent — no UI shown to the user.
         handler.postDelayed({ performGlobalAction(GLOBAL_ACTION_BACK) }, 120)
+    }
+
+    private fun checkForArgoSearchNow() {
+        if (!argoTreeWalkLimiter.tryAcquire()) return
+
+        val root = rootInActiveWindow ?: return
+        val adapter = AccessibilityNodeInfoAdapter(root)
+        try {
+            if (argoSearchDetector.isArgoSearchVisible(adapter)) {
+                bounceBackFromArgoSilently()
+            }
+        } finally {
+            adapter.recycle()
+        }
+    }
+
+    /** Satu kali GLOBAL_ACTION_BACK saja — tanpa double-back. */
+    private fun bounceBackFromArgoSilently() {
+        if (!argoBackActionLimiter.tryAcquire()) return
+        performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
     override fun onInterrupt() {
